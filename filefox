@@ -24,7 +24,7 @@ remote () {
 
 halp () {
 echo "$(basename $0): The fastest way to get from here to there."
-echo "(C) 2018 Alynna Trypnotk; GPL3"
+echo "Version 1.3 (C) 2018 Alynna Trypnotk; GPL3"
 cat << EOF
  Syntax:
   filefox [options] <user@host> <local-dir> <remote-dir>
