@@ -1,5 +1,5 @@
 # Filefox
-''''
+```
 The fastest way to get your data from here to there.
 
  Syntax:
@@ -24,4 +24,4 @@ The fastest way to get your data from here to there.
   --port=<port>         Connect on different port (DEFAULT=65432)"
   -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
                         systems, these are expected:  rsync, pv, lzop, ssh, sshpass
-''''
+```
