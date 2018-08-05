@@ -6,9 +6,9 @@ COMPRESSOR="lzop -1"            # The default compressor.  When in doubt, use th
 RSYNC="rsync --size-only"       # rsync program and its default options.
 METHOD="fast"                   # The default method of transfer.  Recommended not to change this.
 PORT=65432                      # The default port for file transfers.
-BLOCKSIZE=65536                 # TAR Record size, Socat block size, and other things that should be synced.
+BLOCKSIZE=4096                  # TAR Record size, Socat block size, and other things that should be synced.
 TIMEOUT=60                      # Number of seconds of allowed inactivity
-BUF=16777216                    # Send and Receive buffer
+BUF=1048576                     # Send and Receive buffer
 ### End config ###
 
 WORK=`mktemp -p /tmp -d filefox.XXXXXXXXX`
@@ -16,9 +16,9 @@ export PK COMPRESSOR RSYNC METHOD PORT WORK TIMEOUT
 
 remote () {
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
-  echo "sshpass -e ssh -f -E $WORK/log $USERHOST"
+  echo "sshpass -e ssh -E $WORK/log $USERHOST"
  else
-  echo "ssh -f -E $WORK/log $USERHOST"
+  echo "ssh -E $WORK/log $USERHOST"
  fi
 }
 
@@ -153,13 +153,21 @@ exclusion-list () {
 }
 
 finish-up () {
- sleep 1
- pkill -TERM -f "$WORK"
+ sleep 2
+ $(remote) "pkill -TERM -f $WORK" >/dev/null 2>&1
  if [ "$WORK" != "" ]; then
   rm --preserve-root $WORK/*
   rmdir $WORK
  fi
+ pkill -TERM -f "$WORK" >/dev/null 2>&1
  unset SSHPASS PK COMPRESSOR RSYNC METHOD PORT WORK USERHOST SRC DST
+}
+
+datapipe () {
+ P=`echo -n -e "\033[80C"`
+ pv -w80 -bF "[%t]: C:%r A:%a  [%b] DATA >%p> LINE " | \
+ $COMPRESSOR | \
+ pv -w60 -bF "${P}[%b] C:%r A:%a"
 }
 
 # Main Screen Turn On.
@@ -178,18 +186,17 @@ read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 
 exclusion-list
 
 # Note you are responsible for ensuring that the remote side has any compresor other than lzop
-nohup $(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>/dev/null
-nohup $(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>/dev/null
+$(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>&1
+$(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>&1
 echo ">>> Begin transfer ... "
-$(remote) "socat -u -t$TIMEOUT -T$TIMEOUT tcp4-listen:$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF - | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST -xv"
+$(remote) "socat -lp$WORK -u -t$TIMEOUT -T$TIMEOUT tcp4-listen:$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF - | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST -xv 2>&1" &
+sleep 1
 if [ "$METHOD" = "rsync" ]; then
- tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | \
-  pv -w100 -bF "[%t]: %b transferred; Transfer Rate: C:%r A:%a  %p" | $COMPRESSOR | \
+ tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | datapipe | \
   socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
 else
- tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | \
-  pv -w100 -bF "[%t]: %b transferred; Transfer Rate: C:%r A:%a  %p" | $COMPRESSOR | \
+ tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | datapipe | \
   socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
 fi
-echo ">>> Transfur complete."
 finish-up
+echo ">>> Transfur complete."
