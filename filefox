@@ -1,0 +1,168 @@
+#!/bin/bash
+
+### Default config ###
+PK=0                            # 0 = Use SSHPASS; 1 = Use private key
+COMPRESSOR="lzop -1"            # The default compressor.  When in doubt, use this.
+RSYNC="rsync --size-only"       # rsync program and its default options.
+METHOD="fast"                   # The default method of transfer.  Recommended not to change this.
+PORT=65432                      # The default port for file transfers.
+### End config ###
+
+WORK=`mktemp -p /tmp -d filefox.XXXXXXXXX`
+export PK COMPRESSOR RSYNC METHOD PORT WORK
+
+remote () {
+ if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
+  echo "sshpass -e ssh -E $WORK/log $USERHOST"
+ else
+  echo "ssh -E $WORK/log $USERHOST"
+ fi
+}
+
+halp () {
+echo "$(basename $0): The fastest way to get from here to there."
+echo "(C) 2018 Alynna Trypnotk; GPL3"
+cat << EOF
+ Syntax:
+  filefox [options] <user@host> <local-dir> <remote-dir>
+ Options:
+  -n; --new             Start transfer fresh without finding out what files exist in the destination.
+                        Best for starting a new transfer.
+  -f; --fast            Scan the destination for the existence of files only, does not compare times
+                        or file sizes.  (DEFAULT)
+  -r; --rsync           Uses rsync to determine which files should be copied, then copies them using
+                        filefox.  Can catch files that didn't transfer properly that --fast doesn't
+                        catch.
+  -r=<opts>
+  -rsync=<opts>         Adds additional options to rsync when doing an "rsync" bbased transfer.
+  --compressor="<prog>[ opts]"
+  -c="<prog>[ opts]"    Uses a different compressor than the default "lzop -1".
+                        This can be any stream based compressor on your system that uses the -d option
+                        to specify decompression.
+  -k; --privatekey      Do not ask for an SSH password at the beginning, assume private key present.
+  -w; --password        Ask for an ssh password and attempt to use it via SSHPASS.  (DEFAULT)
+  -p=<port>
+EOF
+echo "  --port=<port>         Connect on different port (DEFAULT=$PORT)"
+cat << EOF
+  -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
+                        systems, these are expected:  rsync, pv, lzop, ssh, sshpass
+EOF
+}
+
+install-deps () {
+ # Install dependencies if necessary
+ if [ "$(which nc)" = "" ]; then apt -y install netcat-openbsd; fi
+ if [ "$(which pv)" = "" ]; then apt -y install pv; fi
+ if [ "$(which sshpass)" = "" ]; then apt -y install sshpass; fi
+ if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi
+ if [ "$(which ssh)" = "" ]; then apt -y install ssh; fi
+ if [ "$(which rsync)" = "" ]; then apt -y install rsync; fi
+}
+
+loop-through-opts () {
+for i in "$@"; do
+ case $i in
+  -n|--new) 
+   METHOD=new
+   shift
+  ;;
+  -f|--fast) 
+   METHOD=fast
+   shift
+  ;;
+  -r|--rsync) 
+   METHOD=rsync
+   shift
+  ;;
+  -r=*|--rsync=*) 
+   METHOD=rsync
+   RSYNC="rsync ${i#*=}"
+   shift
+  ;;
+  -c=*|--compressor=*)
+   COMPRESSOR="${i#*=}"
+   shift
+  ;;
+  -h|--help)
+   halp
+   exit 1
+   shift
+  ;;
+  -k|--privatekey)
+   PK=1
+   shift
+  ;;
+  -w|--password)
+   PK=0
+   shift
+  ;;
+  -q|--prerequisites)
+   install-deps
+   exit 1
+   shift
+  ;;
+  -p=*|--port=*)
+   PORT="${i#*=}"
+   shift
+  ;;
+  *)
+   if [ "$USERHOST" = "" ]; then USERHOST=$i; shift;
+   elif [ "$SRC" = "" ];    then SRC=$i;      shift;
+   elif [ "$DST" = "" ];    then DST=$i;      shift;
+   else (echo "!!! Extra options ignored." >&2); shift;
+   fi
+  ;;
+ esac
+done
+export PK COMPRESSOR RSYNC METHOD PORT WORK USERHOST SRC DST
+}
+
+exclusion-list () {
+ if [ "$METHOD" = "new" ]; then
+  echo ">>> Starting new transfer."
+  touch $WORK/exclude-list
+ elif [ "$METHOD" = "rsync" ]; then
+  echo ">>> Using $RSYNC to get files to transfer.  Please be patient ..."
+  $RSYNC -av --dry-run --log-file - --log-format="%i %n%L" --rsh=ssh $SRC $USERHOST:$DST | grep "^<f" | cut -c 13- | pv -w80 -lbp > $WORK/include-list
+ elif [ "$METHOD" = "fast" ]; then
+  echo ">>> Getting files already transferred ..."
+  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w80 -lbp > $WORK/exclude-list
+ else
+  echo ">>> Getting files already transferred ..."
+  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w80 -lbp > $WORK/exclude-list
+ fi
+}
+
+finish-up () {
+ sleep 1
+ pkill -TERM -f "$WORK"
+ if [ "$WORK" != "" ]; then
+  rm --preserve-root $WORK/*
+  rmdir $WORK
+ fi
+ unset SSHPASS PK COMPRESSOR RSYNC METHOD PORT WORK USERHOST SRC DST
+}
+
+# Main Screen Turn On.
+loop-through-opts $@; if [ "$?" = "1" ]; then exit 0; fi
+
+if [ "$PK" = "0" ] || [ "$PK" = "" ]; then 
+ read -s -p "Password: " SSHPASS
+ export SSHPASS
+fi
+
+exclusion-list
+
+# Note you are responsible for ensuring that the remote side has any compresor other than lzop
+$(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 
+echo ">>> Begin transfer ..."
+$(remote) "nc -w5 -l $PORT | $COMPRESSOR -d | tar --posix -piB --record-size=64K --numeric-owner -C $DST -xv ." &
+sleep 0.5
+if [ "$METHOD" = "rsync" ]; then
+ tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -piB --record-size=64K --numeric-owner -c . | pv -w 80 -prb | $COMPRESSOR | nc -w5 $(echo $USERHOST | cut -d@ -f2) $PORT
+else
+ tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -piB --record-size=64K --numeric-owner -c . | pv -w 80 -prb | $COMPRESSOR | nc -w5 $(echo $USERHOST | cut -d@ -f2) $PORT
+fi
+echo ">>> Transfur complete."
+finish-up
