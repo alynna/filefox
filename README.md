@@ -20,6 +20,9 @@ Features:
 * Sets up over SSH, copies over faster unencrypted socket.
 * Change sizes of blocks, buffers and timeouts, and save the defaults to the script.
 
+Bugs / Potential bugs:
+* "Fast" resume mode attempts to do no more than to check of the remote files existence.  You may want to use 'rsync' after to ensure all data made it there OK.
+* RSYNC based file selection may not work in all cases.  If it does not and you find a solution please present it.
 ```
  Syntax:
   filefox [options] <user@host> <local-dir> <remote-dir>
