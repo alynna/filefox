@@ -1,6 +1,7 @@
-# filefox
+# Filefox
+''''
 The fastest way to get your data from here to there.
-'''
+
  Syntax:
   filefox [options] <user@host> <local-dir> <remote-dir>
  Options:
@@ -20,9 +21,7 @@ The fastest way to get your data from here to there.
   -k; --privatekey      Do not ask for an SSH password at the beginning, assume private key present.
   -w; --password        Ask for an ssh password and attempt to use it via SSHPASS.  (DEFAULT)
   -p=<port>
-EOF
-echo "  --port=<port>         Connect on different port (DEFAULT=$PORT)"
-cat << EOF
+  --port=<port>         Connect on different port (DEFAULT=65432)"
   -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
                         systems, these are expected:  rsync, pv, lzop, ssh, sshpass
-'''
+''''
