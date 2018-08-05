@@ -6,16 +6,19 @@ COMPRESSOR="lzop -1"            # The default compressor.  When in doubt, use th
 RSYNC="rsync --size-only"       # rsync program and its default options.
 METHOD="fast"                   # The default method of transfer.  Recommended not to change this.
 PORT=65432                      # The default port for file transfers.
+BLOCKSIZE=65536                 # TAR Record size, Socat block size, and other things that should be synced.
+TIMEOUT=60                      # Number of seconds of allowed inactivity
+BUF=16777216                    # Send and Receive buffer
 ### End config ###
 
 WORK=`mktemp -p /tmp -d filefox.XXXXXXXXX`
-export PK COMPRESSOR RSYNC METHOD PORT WORK
+export PK COMPRESSOR RSYNC METHOD PORT WORK TIMEOUT
 
 remote () {
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
-  echo "sshpass -e ssh -E $WORK/log $USERHOST"
+  echo "sshpass -e ssh -f -E $WORK/log $USERHOST"
  else
-  echo "ssh -E $WORK/log $USERHOST"
+  echo "ssh -f -E $WORK/log $USERHOST"
  fi
 }
 
@@ -41,13 +44,16 @@ cat << EOF
                         to specify decompression.
   -k; --privatekey      Do not ask for an SSH password at the beginning, assume private key present.
   -w; --password        Ask for an ssh password and attempt to use it via SSHPASS.  (DEFAULT)
-  -p=<port>
-EOF
-echo "  --port=<port>         Connect on different port (DEFAULT=$PORT)"
-cat << EOF
   -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
-                        systems, these are expected:  rsync, pv, lzop, ssh, sshpass
 EOF
+echo "  -p=<port>             Connect on different port"
+echo "  --port=<port>          Default port: $PORT"
+echo "  -s=<blocksize>        Set blocksize of TAR records and socat transfer size"
+echo "  --blocksize=<port>     Default blocksize: $BLOCKSIZE"
+echo "  -b=<bufsize>          Total TCP buffer size"
+echo "  --buffer=<bufsize>     Default buffer size: $BUF"
+echo "  -t=<secs>             Total inactivity tolerance"
+echo "  --timeout=<port>       Default inactivity tolerance: $TIMEOUT"
 }
 
 install-deps () {
@@ -103,14 +109,26 @@ for i in "$@"; do
    shift
   ;;
   -p=*|--port=*)
-   PORT="${i#*=}"
+   PORT=${i#*=}
+   shift
+  ;;
+  -b=*|--buffer=*)
+   BUF=${i#*=}
+   shift
+  ;;
+  -s=*|--blocksize=*)
+   BLOCKSIZE=${i#*=}
+   shift
+  ;;
+  -t=*|--timeout=*)
+   TIMEOUT=${i#*=}
    shift
   ;;
   *)
    if [ "$USERHOST" = "" ]; then USERHOST=$i; shift;
    elif [ "$SRC" = "" ];    then SRC=$i;      shift;
    elif [ "$DST" = "" ];    then DST=$i;      shift;
-   else (echo "!!! Extra options ignored." >&2); shift;
+   else (echo "!!! There seems to be an issue with your Options." >&2); shift; exit 2
    fi
   ;;
  esac
@@ -124,13 +142,13 @@ exclusion-list () {
   touch $WORK/exclude-list
  elif [ "$METHOD" = "rsync" ]; then
   echo ">>> Using $RSYNC to get files to transfer.  Please be patient ..."
-  $RSYNC -av --dry-run --log-file - --log-format="%i %n%L" --rsh=ssh $SRC $USERHOST:$DST | grep "^<f" | cut -c 13- | pv -w80 -lbp > $WORK/include-list
+  $RSYNC -av --dry-run --log-file - --log-format="%i %n%L" --rsh=ssh $SRC $USERHOST:$DST | grep "^<f" | cut -c 13- | pv -w100 -l -F "[%t]: Files to be synced [%b]; Transfer Rate: C:%r A:%a  %p" > $WORK/include-list
  elif [ "$METHOD" = "fast" ]; then
   echo ">>> Getting files already transferred ..."
-  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w80 -lbp > $WORK/exclude-list
+  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w100 -l -F "[%t]: Remote files found [%b]; Transfer Rate: C:%r A:%a  %p" > $WORK/exclude-list
  else
   echo ">>> Getting files already transferred ..."
-  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w80 -lbp > $WORK/exclude-list
+  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w100 -l -F "[%t]: Remote files found [%b]; Transfer Rate: C:%r a:%a  %p" > $WORK/exclude-list
  fi
 }
 
@@ -152,17 +170,26 @@ if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
  export SSHPASS
 fi
 
+echo ">>> From $SRC to $DST via $USERHOST:$PORT"
+echo ">>> Resume method: $METHOD   Compression: $COMPRESSOR   Using private key: $PK"
+echo ">>> Socket opts:  TIMEOUT=$TIMEOUT   BLOCKSIZE=$BLOCKSIZE   BUFSIZE=$BUF"
+read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 5 -n 1
+
 exclusion-list
 
 # Note you are responsible for ensuring that the remote side has any compresor other than lzop
-$(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 
-echo ">>> Begin transfer ..."
-$(remote) "nc -w5 -l $PORT | $COMPRESSOR -d | tar --posix -piB --record-size=64K --numeric-owner -C $DST -xv ." &
-sleep 0.5
+nohup $(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>/dev/null
+nohup $(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>/dev/null
+echo ">>> Begin transfer ... "
+$(remote) "socat -u -t$TIMEOUT -T$TIMEOUT tcp4-listen:$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF - | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST -xv"
 if [ "$METHOD" = "rsync" ]; then
- tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -piB --record-size=64K --numeric-owner -c . | pv -w 80 -prb | $COMPRESSOR | nc -w5 $(echo $USERHOST | cut -d@ -f2) $PORT
+ tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | \
+  pv -w100 -bF "[%t]: %b transferred; Transfer Rate: C:%r A:%a  %p" | $COMPRESSOR | \
+  socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
 else
- tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -piB --record-size=64K --numeric-owner -c . | pv -w 80 -prb | $COMPRESSOR | nc -w5 $(echo $USERHOST | cut -d@ -f2) $PORT
+ tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | \
+  pv -w100 -bF "[%t]: %b transferred; Transfer Rate: C:%r A:%a  %p" | $COMPRESSOR | \
+  socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
 fi
 echo ">>> Transfur complete."
 finish-up
