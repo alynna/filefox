@@ -3,16 +3,18 @@
 ### Default config ###
 PK=0                            # 0 = Use SSHPASS; 1 = Use private key
 COMPRESSOR="lzop -1"            # The default compressor.  When in doubt, use this.
-RSYNC="rsync --size-only"       # rsync program and its default options.
-METHOD="fast"                   # The default method of transfer.  Recommended not to change this.
+VERIFY=1                        # Do a rsync after the copy to sync files that changed and ensure integrity
+RESUME=1                        # Default to resuming the transfer.
 PORT=65432                      # The default port for file transfers.
-BLOCKSIZE=4096                  # TAR Record size, Socat block size, and other things that should be synced.
+BLOCKSIZE=65536                 # TAR Record size, Socat block size, and other things that should be synced.
 TIMEOUT=60                      # Number of seconds of allowed inactivity
 BUF=1048576                     # Send and Receive buffer
+ENCRYPTOR=cat                   # Change to "openssl enc -e" to encrypt the connection
+DECRYPTOR=cat                   # Change to "openssl enc -d" to encrypt the connection
 ### End config ###
 
 WORK=`mktemp -p /tmp -d filefox.XXXXXXXXX`
-export PK COMPRESSOR RSYNC METHOD PORT WORK TIMEOUT
+export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
 
 remote () {
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
@@ -24,26 +26,26 @@ remote () {
 
 halp () {
 echo "$(basename $0): The fastest way to get from here to there."
-echo "Version 1.3 (C) 2018 Alynna Trypnotk; GPL3"
+echo "Version 2.04 (C) 2018 Alynna Trypnotk; GPL3"
 cat << EOF
  Syntax:
   filefox [options] <user@host> <local-dir> <remote-dir>
  Options:
   -n; --new             Start transfer fresh without finding out what files exist in the destination.
                         Best for starting a new transfer.
-  -f; --fast            Scan the destination for the existence of files only, does not compare times
-                        or file sizes.  (DEFAULT)
-  -r; --rsync           Uses rsync to determine which files should be copied, then copies them using
-                        filefox.  Can catch files that didn't transfer properly that --fast doesn't
-                        catch.
-  -r=<opts>
-  -rsync=<opts>         Adds additional options to rsync when doing an "rsync" bbased transfer.
-  --compressor="<prog>[ opts]"
-  -c="<prog>[ opts]"    Uses a different compressor than the default "lzop -1".
-                        This can be any stream based compressor on your system that uses the -d option
+  -r; --resume          (DEFAULT) Scan the destination for the existence of files and skip them.
+                        WARNING: does not compare times, file sizes, or file integrity.
+  -v; --verify          (DEFAULT) Check the copy with rsync after doing the copy.  This occurs at the
+                        end of the copy and is used with 'fast' to copy any files that changed and make
+                        sure that the copy is good.
+  -v0; --no-verify      Skip rsync verification check after copy.
+  -y; --encrypt         Pipe through OpenSSL encryption (Slower)
+  -y0; --no-encrypt     (DEFAULT) Do not encrypt (Fast)
+  --compressor="<prog>" Uses a different compressor than the default "lzop -1".
+  -c="<prog>"           This can be any stream based compressor on your system that uses the -d option
                         to specify decompression.
   -k; --privatekey      Do not ask for an SSH password at the beginning, assume private key present.
-  -w; --password        Ask for an ssh password and attempt to use it via SSHPASS.  (DEFAULT)
+  -w; --password        (DEFAULT) Ask for an ssh password and attempt to use it via SSHPASS.
   -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
 EOF
 echo "  -p=<port>             Connect on different port"
@@ -69,25 +71,34 @@ install-deps () {
 loop-through-opts () {
 for i in "$@"; do
  case $i in
-  -n|--new) 
-   METHOD=new
+  -n|-r0|-n1|--new) 
+   RESUME=0
    shift
   ;;
-  -f|--fast) 
-   METHOD=fast
+  -r|-r1|-n0|--resume) 
+   RESUME=1
    shift
   ;;
-  -r|--rsync) 
-   METHOD=rsync
+  -v|-v1|--verify) 
+   VERIFY=1
    shift
   ;;
-  -r=*|--rsync=*) 
-   METHOD=rsync
-   RSYNC="rsync ${i#*=}"
+  -v0|--no-verify) 
+   VERIFY=0
    shift
   ;;
   -c=*|--compressor=*)
    COMPRESSOR="${i#*=}"
+   shift
+  ;;
+  -y|-y1|--encrypt)
+   ENCRYPTOR="openssl enc -e"
+   DECRYPTOR="openssl enc -d"
+   shift
+  ;;
+  -y0|--no-encrypt)
+   ENCRYPTOR="cat"
+   DECRYPTOR="cat"
    shift
   ;;
   -h|--help)
@@ -133,19 +144,13 @@ for i in "$@"; do
   ;;
  esac
 done
-export PK COMPRESSOR RSYNC METHOD PORT WORK USERHOST SRC DST
+export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
 }
 
 exclusion-list () {
- if [ "$METHOD" = "new" ]; then
+ if [ "$RESUME" = "0" ]; then
   echo ">>> Starting new transfer."
   touch $WORK/exclude-list
- elif [ "$METHOD" = "rsync" ]; then
-  echo ">>> Using $RSYNC to get files to transfer.  Please be patient ..."
-  $RSYNC -av --dry-run --log-file - --log-format="%i %n%L" --rsh=ssh $SRC $USERHOST:$DST | grep "^<f" | cut -c 13- | pv -w100 -l -F "[%t]: Files to be synced [%b]; Transfer Rate: C:%r A:%a  %p" > $WORK/include-list
- elif [ "$METHOD" = "fast" ]; then
-  echo ">>> Getting files already transferred ..."
-  $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w100 -l -F "[%t]: Remote files found [%b]; Transfer Rate: C:%r A:%a  %p" > $WORK/exclude-list
  else
   echo ">>> Getting files already transferred ..."
   $(remote) "find $DST -type f -printf \"%P\n\"" | pv -w100 -l -F "[%t]: Remote files found [%b]; Transfer Rate: C:%r a:%a  %p" > $WORK/exclude-list
@@ -160,13 +165,13 @@ finish-up () {
   rmdir $WORK
  fi
  pkill -TERM -f "$WORK" >/dev/null 2>&1
- unset SSHPASS PK COMPRESSOR RSYNC METHOD PORT WORK USERHOST SRC DST
+ unset SSHPASS PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
 }
 
 datapipe () {
  P=`echo -n -e "\033[80C"`
  pv -w80 -bF "[%t]: C:%r A:%a  [%b] DATA >%p> LINE " | \
- $COMPRESSOR | \
+ $COMPRESSOR | $ENCRYPTOR | \
  pv -w60 -bF "${P}[%b] C:%r A:%a"
 }
 
@@ -179,7 +184,7 @@ if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
 fi
 
 echo ">>> From $SRC to $DST via $USERHOST:$PORT"
-echo ">>> Resume method: $METHOD   Compression: $COMPRESSOR   Using private key: $PK"
+echo ">>> Resume: $RESUME  Verify: $VERIFY  Compression: $COMPRESSOR   Private key: $PK"
 echo ">>> Socket opts:  TIMEOUT=$TIMEOUT   BLOCKSIZE=$BLOCKSIZE   BUFSIZE=$BUF"
 read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 5 -n 1
 
@@ -188,15 +193,21 @@ exclusion-list
 # Note you are responsible for ensuring that the remote side has any compresor other than lzop
 $(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>&1
 $(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>&1
-echo ">>> Begin transfer ... "
-$(remote) "socat -lp$WORK -u -t$TIMEOUT -T$TIMEOUT tcp4-listen:$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF - | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST -xv 2>&1" &
+echo ">>> Begin transfer ..."
+$(remote) "mkdir -p $DST"
+$(remote) "socat -lp$WORK -u -t$TIMEOUT -T$TIMEOUT tcp-listen:$PORT,rcvbuf=$BUF,sndbuf=$BUF - \
+ | $DECRYPTOR | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST/ -xv 2>&1" &
 sleep 1
-if [ "$METHOD" = "rsync" ]; then
- tar -C $SRC --verbatim-files-from -T $WORK/include-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | datapipe | \
-  socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
-else
- tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c . | datapipe | \
-  socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp4:$(echo $USERHOST | cut -d@ -f2):$PORT,nonblock=0,rcvbuf=$BUF,rcvbuf-late=$BUF,sndbuf=$BUF,sndbuf-late=$BUF
+
+tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c ./ | datapipe | \
+ socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp:$(echo $USERHOST | cut -d@ -f2):$PORT,rcvbuf=$BUF,sndbuf=$BUF
+if [ "$VERIFY" = "1" ]; then
+ echo ">>> Begin transfer verification check ..."
+ if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
+  rsync -avu --progress --rsh="sshpass -e ssh" $SRC/ $USERHOST:$DEST/
+ else
+  rsync -avu --progress --rsh=ssh $SRC/ $USERHOST:$DEST/
+ fi
 fi
 finish-up
 echo ">>> Transfur complete."
