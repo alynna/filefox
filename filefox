@@ -78,7 +78,6 @@ install-deps () {
  if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi
  if [ "$(which ssh)" = "" ]; then apt -y install ssh; fi
  if [ "$(which rsync)" = "" ]; then apt -y install rsync; fi
- if [ "$(which throttle)" = "" ]; then apt -y install throttle; fi
 }
 
 loop-through-opts () {
