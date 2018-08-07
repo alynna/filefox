@@ -17,6 +17,7 @@ Features:
 * * OpenSSL encryption over the link can be enabled.
 * Change sizes of blocks and buffers, and save the defaults to the script.
 * Uses rsync to verify the transfer and 'catch it up' afterwords.
+* Multithreaded: Makes 3 different pipes to move data through 4 threads on local and remote.
 
 Bugs:
 * Due to the way tar handles its 'exclude-from' contents, some filenames with wildcards may be unconditionally re-transferred.

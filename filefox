@@ -1,5 +1,5 @@
 #!/bin/bash
-FFVERSION=3.5
+FFVERSION=3.9
 
 ### Default config ###
 PK=0                            # 0 = Use SSHPASS; 1 = Use private key
@@ -36,7 +36,7 @@ bool () {
 
 halp () {
 echo "$(basename $0): The fastest way to get from here to there."
-echo "Version $FFVERSION (C) 2018 Alynna Trypnotk; GPL3"
+echo "Version $FFVERSION (C) 2018-$(date +%Y) Alynna Trypnotk; GPL3"
 cat << EOF
  Syntax:
   filefox [options] <user@host> <local-dir> <remote-dir>
@@ -77,7 +77,6 @@ install-deps () {
  if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi
  if [ "$(which ssh)" = "" ]; then apt -y install ssh; fi
  if [ "$(which rsync)" = "" ]; then apt -y install rsync; fi
- if [ "$(which throttle)" = "" ]; then apt -y install throttle; fi
 }
 
 loop-through-opts () {
@@ -176,21 +175,34 @@ exclusion-list () {
 finish-up () {
  sleep 2
  $(remote) "pkill -TERM -f $WORK" >/dev/null 2>&1
- if [ "$WORK" != "" ]; then
-  rm --preserve-root $WORK/*
-  rmdir $WORK
- fi
+ $(remote) "if [ .$WORK. != .. ]; then rm --preserve-root $WORK/*; rmdir $WORK; fi"
+ if [ "$WORK" != "" ]; then rm --preserve-root $WORK/*; rmdir $WORK; fi
  pkill -TERM -f "$WORK" >/dev/null 2>&1
- unset SSHPASS PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TRANSPORT BUF PORT WORK
+ unset SSHPASS PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TRANSPORT BUF PORT WORK RC
 }
 
-datapipe () {
+datapipe-local () {
  E=`echo -n -e "\033[81G"`
  B=`echo -n -e "\033[1G"`
- pv -B$BUF -C -w80 -bF "[%t]: C:%r A:%a  [%b] DATA >%p> LINE " | \
- $COMPRESSOR | $ENCRYPTOR | \
- pv -B$BUF -C -L$LIMIT -w60 -bF "${E}[%b] C:%r A:%a${B}"
+ mkfifo $WORK/crypt.layer $WORK/compress.layer $WORK/archive.layer
+ tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c ./ | \
+  pv -B$BUF -C -w80 -bF "[%t]: C:%r A:%a  [%b] DATA >%p> LINE " >> $WORK/archive.layer &
+ cat $WORK/archive.layer | $COMPRESSOR >> $WORK/compress.layer &
+ cat $WORK/compress.layer | $ENCRYPTOR  >> $WORK/crypt.layer &
+ cat $WORK/crypt.layer | pv -B$BUF -C -L$LIMIT -w60 -bF "${E}[%b] C:%r A:%a${B}" | \
+  socat -u -t1 -T0 -b$BLOCKSIZE - $TRANSPORT:$(echo $USERHOST | cut -d@ -f2):$PORT,rcvbuf=$BUF,sndbuf=$BUF,nonblock=1,keepalive
 }
+
+datapipe-remote () {
+ $(remote) \
+ "mkdir -p $WORK; \
+  mkfifo $WORK/crypt.layer $WORK/compress.layer $WORK/archive.layer; \
+  (socat -lp$WORK -u -t1 -T0 ${TRANSPORT/-connect/}-listen:$PORT,rcvbuf=$BUF,sndbuf=$BUF - >> $WORK/crypt.layer &); \
+  (cat $WORK/crypt.layer | $DECRYPTOR >> $WORK/compress.layer &); \
+  (cat $WORK/compress.layer | $COMPRESSOR -d >> $WORK/archive.layer &); \
+  cat $WORK/archive.layer | tar --posix -p --numeric-owner -C $DST/ -xv 2>&1" &
+}
+
 
 # Main Screen Turn On.
 loop-through-opts $@; if [ "$?" = "1" ]; then exit 0; fi
@@ -200,13 +212,17 @@ echo ">>> From $SRC to $USERHOST:$PORT::$DST over $TRANSPORT"
 echo ">>> Transfer options: RESUME=$(bool $RESUME);  VERIFY=$(bool $VERIFY);  AUTH=$(bool $PK 'Private key' 'SSH Password')"
 echo ">>> Pipe options:     COMPRESSOR=$COMPRESSOR;  ENCRYPTOR=$(bool $([[ .${ENCRYPTOR}. = .cat. ]] && echo 0 || echo 1) $ENCRYPTOR 'None')"
 echo ">>> Socket options:   BLOCKSIZE=$BLOCKSIZE; BUFSIZE=$BUF; SPEEDLIMIT=$LIMIT"
-read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds\n" -t 5 -n 1
+read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 5 -n 1
 
 if [ "$PK" = "0" ] || [ "$PK" = "" ]; then 
+ echo ""
  read -s -p ">>> SSH Password authentication selected, please enter password: " SSHPASS
  export SSHPASS
  echo ""
 fi
+
+$(remote) "mkdir -p $DST"; export RC=$?
+if [ $RC -gt 0 ]; then echo "!!! SSH setup failed returncode $RC.  Aborted."; finish-up; exit 1; fi
 
 exclusion-list
 
@@ -214,13 +230,11 @@ exclusion-list
 $(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>&1
 $(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>&1
 echo ">>> Begin transfer ..."
-$(remote) "mkdir -p $DST"
-$(remote) "socat -lp$WORK -u -t1 -T0 $TRANSPORT-listen:$PORT,rcvbuf=$BUF,sndbuf=$BUF - \
- | $DECRYPTOR | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST/ -xv 2>&1" &
-sleep 1
 
-tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c ./ | datapipe | \
- socat -u -t1 -T0 -b$BLOCKSIZE - $TRANSPORT:$(echo $USERHOST | cut -d@ -f2):$PORT,rcvbuf=$BUF,sndbuf=$BUF,nonblock=1,keepalive
+datapipe-remote
+sleep 1
+datapipe-local
+
 if [ "$VERIFY" = "1" ]; then
  echo ">>> Begin transfer verification check ..."
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
