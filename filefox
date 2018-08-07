@@ -46,8 +46,7 @@ cat << EOF
   -r; --resume          (DEFAULT) Scan the destination for the existence of files and skip them.
                         WARNING: does not compare times, file sizes, or file integrity.
   -v; --verify          (DEFAULT) Check the copy with rsync after doing the copy.  This occurs at the
-                        end of the copy and is used with 'fast' to copy any files that changed and make
-                        sure that the copy is good.
+                        end and is a good compromise between filefox's speed and rsync's reliability.
   -v0; --no-verify      Skip rsync verification check after copy.
   -y; --encrypt         Pipe through OpenSSL encryption (Slower)
   -y0; --no-encrypt     (DEFAULT) Do not encrypt (Fast)
