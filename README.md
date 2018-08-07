@@ -19,7 +19,7 @@ Features:
 * LZOP not doing it for you?  Swap the compressor with any other stream based compressor (must take data from stdin, send out stdout, and take the -d option to decompress.  Almost all compression programs do this.)
 * IPv6 friendly.
 * Sets up over SSH, copies over faster unencrypted socket.
-** OpenSSL encryption over the link can be enabled.  
+* * OpenSSL encryption over the link can be enabled.  
 * Change sizes of blocks, buffers and timeouts, and save the defaults to the script.
 * Uses rsync to verify the transfer and 'catch it up' afterwords.
 ```
