@@ -1,5 +1,5 @@
 #!/bin/bash
-FFVERSION=3.1
+FFVERSION=3.5
 
 ### Default config ###
 PK=0                            # 0 = Use SSHPASS; 1 = Use private key
@@ -8,15 +8,15 @@ VERIFY=1                        # Do a rsync after the copy to sync files that c
 RESUME=1                        # Default to resuming the transfer.
 PORT=65432                      # The default port for file transfers.
 BLOCKSIZE=65536                 # TAR Record size, Socat block size, and other things that should be synced.
-TIMEOUT=60                      # Number of seconds of allowed inactivity
 BUF=1048576                     # Send and Receive buffer
 ENCRYPTOR=cat                   # Change to "openssl enc -e" to encrypt the connection
 DECRYPTOR=cat                   # Change to "openssl enc -d" to encrypt the connection
 LIMIT=0                         # Limit bandwidth usage to $LIMIT bytes
+TRANSPORT=tcp                   # Hey, try UDP or SCTP if you want.
 ### End config ###
 
 WORK=`mktemp -p /tmp -d filefox.XXXXXXXXX`
-export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
+export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TRANSPORT BUF PORT WORK
 
 remote () {
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
@@ -58,6 +58,8 @@ cat << EOF
   -w; --password        (DEFAULT) Ask for an ssh password and attempt to use it via SSHPASS.
   -q; --prerequisites   Install prerequisite programs.  Works on debian based systems.  For other
 EOF
+echo "  -t=<port>             Connect using different transport protocol, such as SCTP or UDP"
+echo "  --transport=<tport>    Default transport: $TRANSPORT"
 echo "  -p=<port>             Connect on different port"
 echo "  --port=<port>          Default port: $PORT"
 echo "  -l=<bytespec>         Limit bandwidth to <bytes>, K M G T can be used"
@@ -66,8 +68,6 @@ echo "  -s=<blocksize>        Set blocksize of TAR records and socat transfer si
 echo "  --blocksize=<port>     Default blocksize: $BLOCKSIZE"
 echo "  -b=<bufsize>          Total TCP buffer size"
 echo "  --buffer=<bufsize>     Default buffer size: $BUF"
-echo "  -t=<secs>             Total inactivity tolerance"
-echo "  --timeout=<port>       Default inactivity tolerance: $TIMEOUT"
 }
 
 install-deps () {
@@ -78,6 +78,7 @@ install-deps () {
  if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi
  if [ "$(which ssh)" = "" ]; then apt -y install ssh; fi
  if [ "$(which rsync)" = "" ]; then apt -y install rsync; fi
+ if [ "$(which throttle)" = "" ]; then apt -y install throttle; fi
 }
 
 loop-through-opts () {
@@ -147,8 +148,8 @@ for i in "$@"; do
    BLOCKSIZE=${i#*=}
    shift
   ;;
-  -t=*|--timeout=*)
-   TIMEOUT=${i#*=}
+  -t=*|--transport=*)
+   TRANSPORT=${i#*=}
    shift
   ;;
   *)
@@ -160,7 +161,7 @@ for i in "$@"; do
   ;;
  esac
 done
-export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
+export PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TRANSPORT BUF PORT WORK
 }
 
 exclusion-list () {
@@ -181,7 +182,7 @@ finish-up () {
   rmdir $WORK
  fi
  pkill -TERM -f "$WORK" >/dev/null 2>&1
- unset SSHPASS PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TIMEOUT BUF PORT WORK
+ unset SSHPASS PK COMPRESSOR ENCRYPTOR DECRYPTOR VERIFY RESUME BLOCKSIZE TRANSPORT BUF PORT WORK
 }
 
 datapipe () {
@@ -195,30 +196,32 @@ datapipe () {
 # Main Screen Turn On.
 loop-through-opts $@; if [ "$?" = "1" ]; then exit 0; fi
 
-if [ "$PK" = "0" ] || [ "$PK" = "" ]; then 
- read -s -p "Password: " SSHPASS
- export SSHPASS
-fi
 echo ">>>>>> Filefox $FFVERSION (C) 2018 Alynna Trypnotk, GPL3"
-echo ">>> From $SRC to $USERHOST:$PORT::$DST -- Auth method: $(bool $PK 'Private key' 'SSH Password')"
-echo ">>> Resume: $(bool $RESUME);  Verify: $(bool $VERIFY);  Encrypt: $(bool $([[ .${ENCRYPTOR}. = .cat. ]] && echo 0 || echo 1));  Compression: $COMPRESSOR"
-echo ">>> SockOpts: TIMEOUT=$TIMEOUT; BLOCKSIZE=$BLOCKSIZE; BUFSIZE=$BUF; SPEEDLIMIT=$LIMIT"
-read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 5 -n 1
+echo ">>> From $SRC to $USERHOST:$PORT::$DST over $TRANSPORT"
+echo ">>> Transfer options: RESUME=$(bool $RESUME);  VERIFY=$(bool $VERIFY);  AUTH=$(bool $PK 'Private key' 'SSH Password')"
+echo ">>> Pipe options:     COMPRESSOR=$COMPRESSOR;  ENCRYPTOR=$(bool $([[ .${ENCRYPTOR}. = .cat. ]] && echo 0 || echo 1) $ENCRYPTOR 'None')"
+echo ">>> Socket options:   BLOCKSIZE=$BLOCKSIZE; BUFSIZE=$BUF; SPEEDLIMIT=$LIMIT"
+read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds\n" -t 5 -n 1
+
+if [ "$PK" = "0" ] || [ "$PK" = "" ]; then 
+ read -s -p ">>> SSH Password authentication selected, please enter password: " SSHPASS
+ export SSHPASS
+ echo ""
+fi
 
 exclusion-list
-
 
 # Note you are responsible for ensuring that the remote side has any compresor other than lzop
 $(remote) 'if [ "$(which lzop)" = "" ]; then apt -y install lzop; fi' 2>&1
 $(remote) 'if [ "$(which socat)" = "" ]; then apt -y install socat; fi' 2>&1
 echo ">>> Begin transfer ..."
 $(remote) "mkdir -p $DST"
-$(remote) "socat -lp$WORK -u -t$TIMEOUT -T$TIMEOUT tcp-listen:$PORT,rcvbuf=$BUF,sndbuf=$BUF - \
+$(remote) "socat -lp$WORK -u -t1 -T0 $TRANSPORT-listen:$PORT,rcvbuf=$BUF,sndbuf=$BUF - \
  | $DECRYPTOR | $COMPRESSOR -d | tar --posix -p --numeric-owner -C $DST/ -xv 2>&1" &
 sleep 1
 
 tar -C $SRC -X $WORK/exclude-list --ignore-failed-read --posix -p --record-size=$BLOCKSIZE --numeric-owner -c ./ | datapipe | \
- socat -u -t1 -T$TIMEOUT -b$BLOCKSIZE - tcp:$(echo $USERHOST | cut -d@ -f2):$PORT,rcvbuf=$BUF,sndbuf=$BUF,nonblock=1
+ socat -u -t1 -T0 -b$BLOCKSIZE - $TRANSPORT:$(echo $USERHOST | cut -d@ -f2):$PORT,rcvbuf=$BUF,sndbuf=$BUF,nonblock=1,keepalive
 if [ "$VERIFY" = "1" ]; then
  echo ">>> Begin transfer verification check ..."
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
