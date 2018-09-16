@@ -215,8 +215,10 @@ echo ">>> Socket options:   BLOCKSIZE=$BLOCKSIZE; BUFSIZE=$BUF; SPEEDLIMIT=$LIMI
 read -p ">>>>>> Press a key to continue, Ctrl-C to abort, or wait 5 seconds" -t 5 -n 1
 
 if [ "$PK" = "0" ] || [ "$PK" = "" ]; then 
- echo ""
- read -s -p ">>> SSH Password authentication selected, please enter password: " SSHPASS
+ if [ "$SSHPASS" = "" ]; then
+  echo ""
+  read -s -p ">>> SSH Password authentication selected, please enter password: " SSHPASS
+ fi
  export SSHPASS
  echo ""
 fi
@@ -238,9 +240,9 @@ datapipe-local
 if [ "$VERIFY" = "1" ]; then
  echo ">>> Begin transfer verification check ..."
  if [ "$PK" = "0" ] || [ "$PK" = "" ]; then
-  rsync -avu --progress --rsh="sshpass -e ssh" $SRC/ $USERHOST:$DEST/
+  rsync -avu --progress --rsh="sshpass -e ssh" $SRC/ $USERHOST:$DST/
  else
-  rsync -avu --progress --rsh=ssh $SRC/ $USERHOST:$DEST/
+  rsync -avu --progress --rsh=ssh $SRC/ $USERHOST:$DST/
  fi
 fi
 finish-up
